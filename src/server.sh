@@ -137,9 +137,10 @@ accelerator() {
    echo 'DoubleServers ds-guard обнаружен: штатное ядро сохраняется для совместимости его модулей. Остальная optimize выполняется.'
    enable_kernel=0
   fi
-  ENABLE_XANMOD=$enable_kernel bash "$dir/scripts/optimize.sh" </dev/null
+  NA_APT_LOCK_TIMEOUT=600 ENABLE_XANMOD=$enable_kernel bash "$dir/scripts/optimize.sh" </dev/null
  else
-  REMNAWAVE_NONINTERACTIVE=1 SSH_PORT="${C[ssh_port]}" TCP_PORTS="$(service_tcp_ports)" UDP_PORTS="${C[udp_ports]}" \
+  python3 "$ROOT/src/accelerator.py" "$dir/scripts/protect.sh"
+  NA_APT_LOCK_TIMEOUT=600 REMNAWAVE_NONINTERACTIVE=1 SSH_PORT="${C[ssh_port]}" TCP_PORTS="$(service_tcp_ports)" UDP_PORTS="${C[udp_ports]}" \
    NODE_PORT=2222 NODE_PORT_WHITELIST_ONLY=1 WHITELIST="${C[whitelist]:-none}" FW_MODE=strict \
    SAFETY_DELAY=1200 ENABLE_PORTSCAN_BAN=0 ENABLE_CROWDSEC=0 bash "$dir/scripts/protect.sh" </dev/null
  fi
@@ -156,7 +157,7 @@ guard_refresh() {
  cat "$staging"/list-* > "$staging/all"
  python3 "$ROOT/src/config.py" subtract "$staging/all" "${C[whitelist]}" > "$staging/filtered"
  [[ -s $staging/filtered ]] || fail 'Пустой список блокировки; прежние правила сохранены'
- traffic-guard full -u "file://$staging/filtered" </dev/null
+ python3 "$ROOT/src/guard.py" "$staging/filtered"
  mv "$staging/filtered" /var/lib/tend/guard-filtered.list
  rm -rf "$staging"
 }
@@ -290,7 +291,7 @@ install_server() {
  exec 8>/var/lib/tend/install.lock; flock -n 8 || fail 'Уже идёт установка'
  export DEBIAN_FRONTEND=noninteractive
  ui_step "Обновление списка пакетов" apt-get update
- ui_step "Установка зависимостей" apt-get install -y curl ca-certificates python3 openssh-server ufw iptables ipset nftables certbot jq openssl cron docker.io docker-compose-v2 dnsutils rsync
+ ui_step "Установка зависимостей" apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates python3 openssh-server ufw iptables ipset nftables certbot jq openssl cron docker.io docker-compose-v2 dnsutils rsync
  ui_step "Запуск Docker и cron" systemctl enable --now docker cron
  ui_step "Установка tend-menu" install_cli
  # Preserve secret configuration only on this machine, never in the project.
