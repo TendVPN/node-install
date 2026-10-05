@@ -1,0 +1,406 @@
+#!/bin/bash
+# Module: DNS Records
+
+# Whether an IPv4 address lies inside Cloudflare's published ranges. The
+# list holds CIDRs, so the match is arithmetic (a plain grep for the host
+# IP never matched). Shares check_domain's weekly cache; a failed refresh
+# falls back to the stale copy.
+dns_ip_is_cloudflare() {
+    local ip="$1" cf_cache="${DIR_REMNAWAVE}cloudflare_ips_v4.cache"
+    local cf_ranges cidr a b c d ip_int net_int mask
+    [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+
+    if [ -s "$cf_cache" ] && [ -z "$(find "$cf_cache" -mtime +7 2>/dev/null)" ]; then
+        cf_ranges=$(cat "$cf_cache")
+    else
+        cf_ranges=$(curl -s --connect-timeout 10 --max-time 15 https://www.cloudflare.com/ips-v4)
+        if echo "$cf_ranges" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$'; then
+            { printf '%s\n' "$cf_ranges" > "$cf_cache"; } 2>/dev/null
+        elif [ -s "$cf_cache" ]; then
+            cf_ranges=$(cat "$cf_cache")
+        fi
+    fi
+
+    IFS='.' read -r a b c d <<< "$ip"
+    ip_int=$(( (10#$a << 24) + (10#$b << 16) + (10#$c << 8) + 10#$d ))
+    while IFS= read -r cidr; do
+        [[ "$cidr" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] || continue
+        net_int=$(( (10#${BASH_REMATCH[1]} << 24) + (10#${BASH_REMATCH[2]} << 16) + (10#${BASH_REMATCH[3]} << 8) + 10#${BASH_REMATCH[4]} ))
+        mask=$(( 10#${BASH_REMATCH[5]} ))
+        [ "$mask" -gt 32 ] && continue
+        if [ $(( ip_int >> (32 - mask) )) -eq $(( net_int >> (32 - mask) )) ]; then
+            return 0
+        fi
+    done <<< "$cf_ranges"
+    return 1
+}
+
+dns_record_points_here() {
+    local domain="$1" server_ip="$2" allow_cf="${3:-true}"
+    local domain_ip
+    domain_ip=$(dig +short A "$domain" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+
+    [ -z "$domain_ip" ] && return 1
+    [ "$domain_ip" = "$server_ip" ] && return 0
+    [ "$allow_cf" = true ] && dns_ip_is_cloudflare "$domain_ip"
+}
+
+# Public IPv4 of this server for the record value. The shape-checked
+# get_public_ipv4 (API module) is used: a plain `curl -s` passed an error
+# page of an IP echo service (HTTP 403/503 still exits 0) into DNS bodies.
+dns_server_ipv4() {
+    command -v get_public_ipv4 >/dev/null 2>&1 || load_api_module >/dev/null 2>&1 || true
+    command -v get_public_ipv4 >/dev/null 2>&1 || return 1
+    get_public_ipv4
+}
+
+manual_dns_record_flow() {
+    local domain="$1" server_ip="$2" allow_cf="${3:-true}"
+
+    echo -e ""
+    printf "${COLOR_YELLOW}${LANG[DNS_RECORD_MANUAL_HINT]}${COLOR_RESET}\n" "$domain" "$server_ip"
+    echo -e "${COLOR_RED}${LANG[DNS_RECORD_MANUAL_WARN]}${COLOR_RESET}"
+
+    while true; do
+        echo -e ""
+        # EOF on stdin (Ctrl+D, closed input) ends the wait as a skip
+        reading "${LANG[DNS_RECORD_MANUAL_WAIT]}" manual_wait_done || return 1
+        if dns_record_points_here "$domain" "$server_ip" "$allow_cf"; then
+            printf "${COLOR_GREEN}${LANG[DNS_RECORD_FOUND]}${COLOR_RESET}\n" "$domain"
+            return 0
+        fi
+
+        echo -e ""
+        echo -e "${COLOR_RED}${LANG[DNS_RECORD_STILL_MISSING]}${COLOR_RESET}"
+        echo -e ""
+        echo -e "${COLOR_YELLOW}1. ${LANG[DNS_RECORD_RETRY]}${COLOR_RESET}"
+        echo -e "${COLOR_YELLOW}2. ${LANG[DNS_RECORD_SKIP]}${COLOR_RESET}"
+        echo -e ""
+        local again
+        while true; do
+            reading "${LANG[DNS_RECORD_CHECK_PROMPT]}" again || return 1
+            case "$again" in
+                1) break ;;
+                2) return 1 ;;
+                *) echo -e "${COLOR_RED}${LANG[CERT_INVALID_CHOICE]}${COLOR_RESET}" ;;
+            esac
+        done
+    done
+}
+
+ensure_dns_record() {
+    local domain="$1"
+    local allow_cf="${2:-true}"
+    local base_domain
+    base_domain=$(extract_domain "$domain")
+
+    local server_ip
+    # Without a valid server IP nothing may be written into DNS: a wrong
+    # value would also make a correct record look foreign and get replaced
+    if ! server_ip=$(dns_server_ipv4); then
+        echo -e "${COLOR_RED}${LANG[CHECK_DOMAIN_IP_FAIL]}${COLOR_RESET}"
+        return 1
+    fi
+
+    if dns_record_points_here "$domain" "$server_ip" "$allow_cf"; then
+        return 0
+    fi
+
+    dns_saved_credentials_load
+
+    # A failed auto attempt has already printed its specific error (zone not
+    # found, rejected token, HTTP failure); the generic missing-record line
+    # would only repeat it.
+    local auto_attempted=0
+    if [ -n "$BUNNY_API_KEY" ]; then
+        auto_attempted=1
+        ensure_dns_record_bunny "$domain" "$base_domain" "$server_ip" && return 0
+    elif [ -n "$GCORE_API_KEY" ]; then
+        auto_attempted=1
+        ensure_dns_record_gcore "$domain" "$base_domain" "$server_ip" && return 0
+    elif [ -n "$CLOUDFLARE_API_KEY" ]; then
+        auto_attempted=1
+        ensure_dns_record_cloudflare "$domain" "$base_domain" "$server_ip" "$allow_cf" && return 0
+    fi
+
+    [ "$auto_attempted" = 0 ] && printf "${COLOR_YELLOW}${LANG[DNS_RECORD_MISSING]}${COLOR_RESET}\n" "$domain"
+
+    local choice
+    while true; do
+        echo -e ""
+        echo -e "${COLOR_YELLOW}1. ${LANG[DNS_RECORD_CREATE_CF]}${COLOR_RESET}"
+        echo -e "${COLOR_YELLOW}2. ${LANG[DNS_RECORD_CREATE_GC]}${COLOR_RESET}"
+        echo -e "${COLOR_YELLOW}3. ${LANG[DNS_RECORD_CREATE_BUNNY]}${COLOR_RESET}"
+        echo -e "${COLOR_YELLOW}4. ${LANG[DNS_RECORD_MANUAL]}${COLOR_RESET}"
+        echo -e ""
+        # EOF on stdin gives up instead of redrawing the menu forever
+        reading "${LANG[DNS_RECORD_CHOOSE]}" choice || return 1
+        case "$choice" in
+            1) ensure_dns_record_cloudflare "$domain" "$base_domain" "$server_ip" "$allow_cf"; return $? ;;
+            2) ensure_dns_record_gcore "$domain" "$base_domain" "$server_ip"; return $? ;;
+            3) ensure_dns_record_bunny "$domain" "$base_domain" "$server_ip"; return $? ;;
+            4) manual_dns_record_flow "$domain" "$server_ip" "$allow_cf"; return $? ;;
+            *) echo -e "${COLOR_RED}${LANG[CERT_INVALID_CHOICE]}${COLOR_RESET}" ;;
+        esac
+    done
+}
+
+ensure_dns_record_bunny() {
+    local domain="$1" base_domain="$2" server_ip="$3"
+
+    if [ -z "$BUNNY_API_KEY" ]; then
+        reading "${LANG[ENTER_BUNNY_TOKEN]}" BUNNY_API_KEY
+    fi
+
+    # The zone list carries every zone of the account; the record's parent
+    # zone is the registrable base (the suffix-aware extract_domain).
+    local zones_resp zone_id
+    zones_resp=$(curl -s --max-time 20 "https://api.bunny.net/dnszone" \
+        -H "AccessKey: ${BUNNY_API_KEY}" -H "Accept: application/json")
+    zone_id=$(echo "$zones_resp" | jq -r --arg zone "$base_domain" \
+        '.Items[]? | select(.Domain == $zone) | .Id' | head -n1)
+    if [ -z "$zone_id" ]; then
+        printf "${COLOR_RED}${LANG[DNS_RECORD_ZONE_NOT_FOUND]}${COLOR_RESET}\n" "$base_domain"
+        return 1
+    fi
+
+    # The working key refreshes certbot's renewal credential too — after a
+    # key roll the old bunny.ini would fail the next wildcard renewal.
+    # Written and announced only when the content actually changes: one
+    # install passes through here once per domain.
+    local bunny_ini="$HOME/.secrets/certbot/bunny.ini" bunny_body
+    bunny_body=$(printf 'dns_bunny_api_key = %s' "$BUNNY_API_KEY")
+    if [ ! -f "$bunny_ini" ] || [ "$(cat "$bunny_ini")" != "$bunny_body" ]; then
+        mkdir -p "$HOME/.secrets/certbot"
+        printf '%s\n' "$bunny_body" > "$bunny_ini"
+        chmod 600 "$bunny_ini" 2>/dev/null
+        printf "${COLOR_GRAY}${LANG[DNS_TOKEN_REFRESHED]}${COLOR_RESET}\n" "$bunny_ini"
+    fi
+
+    # Record names are relative to the zone (panel.example.com in the
+    # example.com zone is just "panel"); the apex record is "@".
+    local record_name
+    if [ "$domain" = "$base_domain" ]; then
+        record_name="@"
+    else
+        record_name="${domain%.$base_domain}"
+    fi
+
+    local zone_resp record_id stale_ids has_ip
+    zone_resp=$(curl -s --max-time 20 "https://api.bunny.net/dnszone/$zone_id" \
+        -H "AccessKey: ${BUNNY_API_KEY}" -H "Accept: application/json")
+    # Every A record of the name counts, not just the first: one already
+    # carrying this IP is kept, the others are stale
+    has_ip=$(echo "$zone_resp" | jq -r --arg name "$record_name" --arg ip "$server_ip" \
+        '[.Records[]? | select(.Type == 0 and .Name == $name and .Value == $ip)] | length' 2>/dev/null)
+    stale_ids=$(echo "$zone_resp" | jq -r --arg name "$record_name" --arg ip "$server_ip" \
+        '.Records[]? | select(.Type == 0 and .Name == $name and .Value != $ip) | .Id' 2>/dev/null)
+
+    local http_code
+    # Create first, delete after: a failed create leaves the zone as it
+    # was instead of without any A record. Delete + create are the two
+    # operations certbot-dns-bunny itself relies on.
+    if [ "${has_ip:-0}" = "0" ]; then
+        http_code=$(curl -s -o /tmp/bunny-dns.out -w "%{http_code}" --max-time 20 -X PUT \
+            "https://api.bunny.net/dnszone/$zone_id/records" \
+            -H "AccessKey: ${BUNNY_API_KEY}" -H "Content-Type: application/json" \
+            --data "{\"Type\":0,\"Ttl\":120,\"Name\":\"$record_name\",\"Value\":\"$server_ip\"}")
+        if [ "$http_code" != "201" ]; then
+            echo -e "${COLOR_RED}${LANG[DNS_RECORD_FAILED]} (HTTP $http_code)${COLOR_RESET}"
+            [ -s /tmp/bunny-dns.out ] && echo -e "${COLOR_RED}$(tail -c 200 /tmp/bunny-dns.out)${COLOR_RESET}"
+            rm -f /tmp/bunny-dns.out
+            return 1
+        fi
+    fi
+
+    for record_id in $stale_ids; do
+        http_code=$(curl -s -o /tmp/bunny-dns.out -w "%{http_code}" --max-time 20 -X DELETE \
+            "https://api.bunny.net/dnszone/$zone_id/records/$record_id" \
+            -H "AccessKey: ${BUNNY_API_KEY}" -H "Accept: application/json")
+        if [ "$http_code" != "204" ]; then
+            # The new record exists, but the old IP still answers too
+            echo -e "${COLOR_RED}${LANG[DNS_RECORD_FAILED]} (HTTP $http_code)${COLOR_RESET}"
+            [ -s /tmp/bunny-dns.out ] && echo -e "${COLOR_RED}$(tail -c 200 /tmp/bunny-dns.out)${COLOR_RESET}"
+            rm -f /tmp/bunny-dns.out
+            return 1
+        fi
+    done
+
+    DNS_RECORD_PROVIDER=bunny
+    printf "${COLOR_GREEN}${LANG[DNS_RECORD_CREATED]}${COLOR_RESET}\n" "$domain" "$server_ip"
+    rm -f /tmp/bunny-dns.out
+    return 0
+}
+
+ensure_dns_record_cloudflare() {
+    # allow_cf=true (tinyauth, status pages) keeps a proxied record proxied;
+    # the default false serves Reality domains and node records
+    local domain="$1" base_domain="$2" server_ip="$3" allow_cf="${4:-false}"
+    local auth_header zone_resp zone_id cf_err
+
+    # A rolled or revoked token must not poison the whole run: Cloudflare's
+    # auth failure is reported as such (not as a missing zone), the token
+    # is re-asked, and the attempt repeats.
+    local attempt
+    for attempt in 1 2 3; do
+        if [ -z "$CLOUDFLARE_API_KEY" ]; then
+            reading "${LANG[ENTER_CF_TOKEN]}" CLOUDFLARE_API_KEY
+        fi
+        auth_header="Authorization: Bearer ${CLOUDFLARE_API_KEY}"
+        if [[ ! $CLOUDFLARE_API_KEY =~ [A-Z] ]]; then
+            if [ -z "$CLOUDFLARE_EMAIL" ]; then
+                reading "${LANG[ENTER_CF_EMAIL]}" CLOUDFLARE_EMAIL
+            fi
+            auth_header="X-Auth-Key: ${CLOUDFLARE_API_KEY}"
+        fi
+
+        zone_resp=$(curl -s --max-time 20 "https://api.cloudflare.com/client/v4/zones?name=$base_domain" \
+            -H "$auth_header" -H "X-Auth-Email: ${CLOUDFLARE_EMAIL:-}" -H "Content-Type: application/json")
+
+        if echo "$zone_resp" | jq -e '.success == false' >/dev/null 2>&1; then
+            cf_err=$(echo "$zone_resp" | jq -r '.errors[0].message // .errors[0].code // "unknown"')
+            printf "${COLOR_RED}${LANG[DNS_TOKEN_REJECTED]}${COLOR_RESET}\n" "$cf_err"
+            CLOUDFLARE_API_KEY=""
+            CLOUDFLARE_EMAIL=""
+            continue
+        fi
+
+        zone_id=$(echo "$zone_resp" | jq -r '.result[0].id // empty' 2>/dev/null)
+        if [ -z "$zone_id" ]; then
+            printf "${COLOR_RED}${LANG[DNS_RECORD_ZONE_NOT_FOUND]}${COLOR_RESET}\n" "$base_domain"
+            return 1
+        fi
+        break
+    done
+    if [ -z "$zone_id" ]; then
+        echo -e "${COLOR_RED}${LANG[DNS_TOKEN_REJECTED_FINAL]}${COLOR_RESET}"
+        return 1
+    fi
+
+    # The working token refreshes certbot's renewal credential too — after a
+    # token roll the old cloudflare.ini would fail the next wildcard renewal.
+    # Written and announced only when the content actually changes: a token
+    # seeded from this very file must not re-announce itself per domain.
+    local cf_ini="$HOME/.secrets/certbot/cloudflare.ini" cf_body
+    if [[ $CLOUDFLARE_API_KEY =~ [A-Z] ]]; then
+        cf_body=$(printf 'dns_cloudflare_api_token = %s' "$CLOUDFLARE_API_KEY")
+    else
+        cf_body=$(printf 'dns_cloudflare_email = %s\ndns_cloudflare_api_key = %s' "$CLOUDFLARE_EMAIL" "$CLOUDFLARE_API_KEY")
+    fi
+    if [ ! -f "$cf_ini" ] || [ "$(cat "$cf_ini")" != "$cf_body" ]; then
+        mkdir -p "$HOME/.secrets/certbot"
+        printf '%s\n' "$cf_body" > "$cf_ini"
+        chmod 600 "$cf_ini" 2>/dev/null
+        printf "${COLOR_GRAY}${LANG[DNS_TOKEN_REFRESHED]}${COLOR_RESET}\n" "$cf_ini"
+    fi
+
+    local record_json record_id record_content record_proxied response
+    record_json=$(curl -s --max-time 20 "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&name=$domain" \
+        -H "$auth_header" -H "X-Auth-Email: ${CLOUDFLARE_EMAIL:-}" -H "Content-Type: application/json")
+    record_id=$(echo "$record_json" | jq -r '.result[0].id // empty' 2>/dev/null)
+    record_content=$(echo "$record_json" | jq -r '.result[0].content // empty' 2>/dev/null)
+    record_proxied=$(echo "$record_json" | jq -r '.result[0].proxied // false' 2>/dev/null)
+
+    # DNS-only record: a proxied one breaks Reality selfsteal domains and
+    # is not needed for the DNS-01 challenge either. Where the caller
+    # accepts the Cloudflare proxy, a proxied record stays proxied —
+    # switching it to DNS-only would expose the origin IP.
+    local proxied=false
+    if [ "$allow_cf" = true ] && [ "$record_proxied" = "true" ]; then
+        proxied=true
+        if [ "$record_content" = "$server_ip" ]; then
+            DNS_RECORD_PROVIDER=cloudflare
+            printf "${COLOR_GREEN}${LANG[DNS_RECORD_FOUND]}${COLOR_RESET}\n" "$domain"
+            return 0
+        fi
+    fi
+    if [ -n "$record_id" ]; then
+        response=$(curl -s --max-time 20 -X PATCH "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
+            -H "$auth_header" -H "X-Auth-Email: ${CLOUDFLARE_EMAIL:-}" -H "Content-Type: application/json" \
+            --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$server_ip\",\"ttl\":120,\"proxied\":$proxied}")
+        if echo "$response" | jq -e '.success == true' > /dev/null 2>&1; then
+            DNS_RECORD_PROVIDER=cloudflare
+            if [ "$proxied" = true ]; then
+                printf "${COLOR_GREEN}${LANG[DNS_RECORD_UPDATED_PROXIED]}${COLOR_RESET}\n" "$domain" "$server_ip"
+            else
+                printf "${COLOR_GREEN}${LANG[DNS_RECORD_UPDATED]}${COLOR_RESET}\n" "$domain" "$server_ip"
+            fi
+            return 0
+        fi
+        echo -e "${COLOR_RED}${LANG[DNS_RECORD_FAILED]}: $(echo "$response" | jq -r '.errors[0].message // "unknown error"')${COLOR_RESET}"
+        return 1
+    fi
+
+    response=$(curl -s --max-time 20 -X POST "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records" \
+        -H "$auth_header" -H "X-Auth-Email: ${CLOUDFLARE_EMAIL:-}" -H "Content-Type: application/json" \
+        --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$server_ip\",\"ttl\":120,\"proxied\":false}")
+
+    if echo "$response" | jq -e '.success == true' > /dev/null 2>&1; then
+        DNS_RECORD_PROVIDER=cloudflare
+        printf "${COLOR_GREEN}${LANG[DNS_RECORD_CREATED]}${COLOR_RESET}\n" "$domain" "$server_ip"
+        return 0
+    fi
+
+    echo -e "${COLOR_RED}${LANG[DNS_RECORD_FAILED]}: $(echo "$response" | jq -r '.errors[0].message // "unknown error"')${COLOR_RESET}"
+    return 1
+}
+
+# A working key must refresh certbot's renewal credential too — a rolled key
+# left in gcore.ini would fail the next wildcard renewal. Called only after
+# the API accepted a request, so an invalid key never overwrites a good ini;
+# written and announced only when the content actually changes.
+gcore_remember_key() {
+    local gcore_ini="$HOME/.secrets/certbot/gcore.ini" gcore_body
+    gcore_body=$(printf 'dns_gcore_apitoken = %s' "$GCORE_API_KEY")
+    if [ ! -f "$gcore_ini" ] || [ "$(cat "$gcore_ini")" != "$gcore_body" ]; then
+        mkdir -p "$HOME/.secrets/certbot"
+        printf '%s\n' "$gcore_body" > "$gcore_ini"
+        chmod 600 "$gcore_ini" 2>/dev/null
+        printf "${COLOR_GRAY}${LANG[DNS_TOKEN_REFRESHED]}${COLOR_RESET}\n" "$gcore_ini"
+    fi
+}
+
+ensure_dns_record_gcore() {
+    local domain="$1" base_domain="$2" server_ip="$3"
+
+    if [ -z "$GCORE_API_KEY" ]; then
+        reading "${LANG[ENTER_GCORE_TOKEN]}" GCORE_API_KEY
+    fi
+
+    local body host http_code
+    body=$(printf '{"resource_records":[{"content":["%s"],"enabled":true}],"ttl":120}' "$server_ip")
+
+    for host in "https://api.gcore.com" "https://api.edgecenter.ru"; do
+        http_code=$(curl -s -o /tmp/gcore-dns.out -w "%{http_code}" --max-time 20 -X POST \
+            "${host}/dns/v2/zones/${base_domain}/${domain}./A" \
+            -H "Authorization: APIKey ${GCORE_API_KEY}" -H "Content-Type: application/json" \
+            --data "$body")
+
+        if [ "$http_code" = "200" ] || [ "$http_code" = "201" ] || [ "$http_code" = "204" ]; then
+            DNS_RECORD_PROVIDER=gcore
+            gcore_remember_key
+            printf "${COLOR_GREEN}${LANG[DNS_RECORD_CREATED]}${COLOR_RESET}\n" "$domain" "$server_ip"
+            rm -f /tmp/gcore-dns.out
+            return 0
+        fi
+
+        if [ "$http_code" = "409" ]; then
+            http_code=$(curl -s -o /tmp/gcore-dns.out -w "%{http_code}" --max-time 20 -X PUT \
+                "${host}/dns/v2/zones/${base_domain}/${domain}./A" \
+                -H "Authorization: APIKey ${GCORE_API_KEY}" -H "Content-Type: application/json" \
+                --data "$body")
+            if [ "$http_code" = "200" ] || [ "$http_code" = "201" ] || [ "$http_code" = "204" ]; then
+                DNS_RECORD_PROVIDER=gcore
+                gcore_remember_key
+                printf "${COLOR_GREEN}${LANG[DNS_RECORD_UPDATED]}${COLOR_RESET}\n" "$domain" "$server_ip"
+                rm -f /tmp/gcore-dns.out
+                return 0
+            fi
+        fi
+    done
+
+    echo -e "${COLOR_RED}${LANG[DNS_RECORD_FAILED]} (HTTP $http_code)${COLOR_RESET}"
+    [ -s /tmp/gcore-dns.out ] && echo -e "${COLOR_RED}$(tail -c 200 /tmp/gcore-dns.out)${COLOR_RESET}"
+    rm -f /tmp/gcore-dns.out
+    return 1
+}

@@ -1,0 +1,7 @@
+*.log
+*.secret
+.env
+config.json
+defaults.json
+__pycache__/
+.test-output/
