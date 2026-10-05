@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """JSON configuration, input validation and network-list subtraction. No eval."""
 import ipaddress,json,os,re,sys,tempfile
-FIELDS={'role','email','node_domain','panel_ip','node_secret','ssh_port','tcp_ports','udp_ports','regions','whitelist','optimize','protect','traffic_guard','psiphon','multitest','xanmod','guard_urls'}
+FIELDS={'role','email','node_domain','panel_ip','node_secret','disable_password_auth','ssh_port','tcp_ports','udp_ports','regions','whitelist','optimize','protect','traffic_guard','psiphon','multitest','xanmod','guard_urls'}
 def validate(c):
     unknown=set(c)-FIELDS
     if unknown: raise ValueError('Неизвестные настройки: '+', '.join(sorted(unknown)))
@@ -11,7 +11,7 @@ def validate(c):
         if k in ('ssh_port','tcp_ports','udp_ports') and not (k in ('tcp_ports','udp_ports') and v=='none'):
             for p in v.split(','):
                 if not p.isdigit() or not 1<=int(p)<=65535: raise ValueError('Неверный порт: '+k)
-        if k in ('optimize','protect','traffic_guard','psiphon','multitest','xanmod') and v not in ('yes','no'): raise ValueError(k+': yes/no')
+        if k in ('disable_password_auth','optimize','protect','traffic_guard','psiphon','multitest','xanmod') and v not in ('yes','no'): raise ValueError(k+': yes/no')
         if k=='role' and v!='node': raise ValueError('Допустимое значение role: node')
         if k.endswith('_domain') and v and (len(v)>253 or not re.fullmatch(r'(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}',v)): raise ValueError('Неверный домен: '+k)
         if k=='email' and v and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',v): raise ValueError('Неверный email')

@@ -15,6 +15,7 @@ ui_field() {
  local key=$1 title description example
  case $key in
  email) title='Email для сертификатов'; description='Let’s Encrypt использует его для регистрации сертификатов ваших доменов.'; example='admin@example.org';;
+ disable_password_auth) title='Закрыть вход по паролю?'; description='Отключает пароль и keyboard-interactive для SSH. Перед включением проверьте вход по ключу в новом соединении.'; example='y';;
  ssh_port) title='Порт SSH этого VPS'; description='Порт для подключения после установки. Это не порт управления нодой (2222).'; example='22223';;
  tcp_ports) title='Разрешённые TCP-порты'; description='Порты через запятую или n — без дополнительных TCP-портов. SSH, HTTP для сертификатов и порт управления нодой для панели сохраняется.'; example='443,8443 или n';;
  udp_ports) title='Разрешённые UDP-порты'; description='Порты через запятую. Введите n, чтобы не открывать сервисные UDP-порты.'; example='443,8443 или n';;
@@ -44,7 +45,7 @@ setup_wizard() {
  ui_note 'Параметры, указанные флагами, повторно не спрашиваются.'
  collect
  ui_heading 'SSH и сервисные порты'
- for k in ssh_port tcp_ports udp_ports; do wizard_field "$k"; done
+ for k in ssh_port disable_password_auth tcp_ports udp_ports; do wizard_field "$k"; done
  ui_heading 'Компоненты'
  for k in optimize protect traffic_guard psiphon multitest xanmod; do wizard_field "$k"; done
  ui_heading 'Регионы и доверенные адреса'

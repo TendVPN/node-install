@@ -43,7 +43,7 @@ class VPSWorkflowTests(unittest.TestCase):
       if not part:break
       out+=part
       if not sent and 'Ответ ['.encode() in out:
-       os.write(fd,('\n'.join(['','n','n','n','','','','','',''])+'\n').encode());sent=True
+       os.write(fd,('\n'.join(['','y','n','n','n','','','','','',''])+'\n').encode());sent=True
      done,status=os.waitpid(pid,os.WNOHANG)
      if done:break
     if status is None or not done:os.kill(pid,signal.SIGKILL);_,status=os.waitpid(pid,0)
@@ -53,6 +53,7 @@ class VPSWorkflowTests(unittest.TestCase):
    self.assertIn('Пример ответа: 22223',text);self.assertIn('\x1b[',text)
    self.assertNotIn('Что установить на этом VPS?',text);self.assertNotIn('Оптимизация VPS',text)
    self.assertIn('[Tend-Menu]:',text);self.assertRegex(text,r'tcp_ports\s+none');self.assertIn('Ответ [Y/n]',text);self.assertRegex(text,r'udp_ports\s+none')
+   self.assertIn('Закрыть вход по паролю?',text);self.assertRegex(text,r'disable_password_auth\s+yes')
    self.assertRegex(text,r'protect\s+no');self.assertRegex(text,r'optimize\s+no')
  def test_bootstrap_forwards_flags_without_installing(self):
   with tempfile.TemporaryDirectory() as d:

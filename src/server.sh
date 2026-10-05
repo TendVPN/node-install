@@ -30,15 +30,15 @@ install_cli() {
  rm -f /opt/tend/vendor/remnawave-reverse-proxy/src/modules/manage_panel.sh
  if [[ -f /opt/tend/lib/ssh-client.sh ]]; then rm -- /opt/tend/lib/ssh-client.sh; fi
  chmod -R go-rwx /etc/tend /var/lib/tend /var/log/tend
- cat >/usr/local/src/tend.sh <<'EOF'
+ cat >/usr/local/bin/tend <<'EOF'
 #!/usr/bin/env bash
 exec bash /opt/tend/src/tend.sh "$@"
 EOF
- cat >/usr/local/src/tend.sh-menu <<'EOF'
+ cat >/usr/local/bin/tend-menu <<'EOF'
 #!/usr/bin/env bash
 exec bash /opt/tend/src/tend.sh menu "$@"
 EOF
- chmod 755 /usr/local/src/tend.sh /usr/local/src/tend.sh-menu
+ chmod 755 /usr/local/bin/tend /usr/local/bin/tend-menu
 }
 setup_ssh() {
  ui_action info "Настройка SSH и таймера отката"
@@ -51,6 +51,13 @@ setup_ssh() {
  sed -i -E '/^[[:space:]]*Port[[:space:]]+/d' /etc/ssh/sshd_config
  find /etc/ssh/sshd_config.d -type f -name '*.conf' -exec sed -i -E '/^[[:space:]]*Port[[:space:]]+/d' {} +
  printf 'Port %s\n' "$port" >/etc/ssh/sshd_config.d/00-tend-port.conf
+ if [[ ${C[disable_password_auth]:-no} == yes ]]; then
+  # Remove overrides, including Match blocks; originals are in the SSH backup.
+  local auth_pattern='/^[[:space:]]*(PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)[[:space:]]+/Id'
+  sed -i -E "$auth_pattern" /etc/ssh/sshd_config
+  find /etc/ssh/sshd_config.d -type f -name '*.conf' -exec sed -i -E "$auth_pattern" {} +
+  sed -i '1i PasswordAuthentication no\nKbdInteractiveAuthentication no\nChallengeResponseAuthentication no' /etc/ssh/sshd_config
+ fi
  if ! /usr/sbin/sshd -t; then
   cp -a /var/lib/tend/ssh-backup/sshd_config /etc/ssh/
   rm -f /etc/ssh/sshd_config.d/00-tend-port.conf

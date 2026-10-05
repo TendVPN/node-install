@@ -4,7 +4,7 @@ umask 077
 ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3))) || { echo "Нужен Bash 4.3+" >&2; exit 1; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CONFIG=${TEND_CONFIG:-/etc/tend/config.json}
-declare -A C=([role]=node [ssh_port]=22223 [tcp_ports]=443,8443 [udp_ports]=443,8443 [regions]=DE,NL,FR [optimize]=yes [protect]=yes [traffic_guard]=yes [psiphon]=yes [multitest]=yes [xanmod]=yes [whitelist]='' [email]='' [guard_urls]=https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/main/public/antiscanner.list)
+declare -A C=([role]=node [ssh_port]=22223 [disable_password_auth]=no [tcp_ports]=443,8443 [udp_ports]=443,8443 [regions]=DE,NL,FR [optimize]=yes [protect]=yes [traffic_guard]=yes [psiphon]=yes [multitest]=yes [xanmod]=yes [whitelist]='' [email]='' [guard_urls]=https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/main/public/antiscanner.list)
 source "$ROOT/src/ui.sh"
 fail() { ui_action error "Ошибка: $*" >&2; exit 1; }
 help() {
@@ -22,6 +22,7 @@ Tend — установка Remnawave и обслуживание VPS (Ubuntu 24
   --role node                       Необязательный флаг совместимости
   --email EMAIL --node-domain DOMAIN
   --panel-ip IPV4 --node-secret-file FILE
+  --disable-password-auth yes|no     Закрыть вход по SSH с паролем (по умолчанию no)
   --ssh-port 22223 --tcp-ports 443,8443 --udp-ports 443,8443
   --tcp-ports none                    Не открывать дополнительные TCP-порты (также n)
   --udp-ports none                    Не открывать сервисные UDP-порты (также n)
@@ -47,7 +48,7 @@ ask() {
  ui_field "$key" "$label"
  local displayed=$default
  case $key in
- optimize|protect|traffic_guard|psiphon|multitest|xanmod) if [[ $default == yes ]]; then displayed='Y/n'; else displayed='y/N'; fi;;
+ disable_password_auth|optimize|protect|traffic_guard|psiphon|multitest|xanmod) if [[ $default == yes ]]; then displayed='Y/n'; else displayed='y/N'; fi;;
  tcp_ports|udp_ports) [[ $default != none ]] || displayed=n;;
  esac
  printf '  %sОтвет [%s]: %s' "$UI_BLUE" "${displayed:-пусто}" "$UI_RESET" >/dev/tty
@@ -55,7 +56,7 @@ ask() {
   IFS= read -rs answer </dev/tty || fail 'Ввод прерван'; echo >/dev/tty
  else IFS= read -r answer </dev/tty || fail 'Ввод прерван'; fi
  C[$key]=${answer:-$default}
- case $key in optimize|protect|traffic_guard|psiphon|multitest|xanmod)
+ case $key in disable_password_auth|optimize|protect|traffic_guard|psiphon|multitest|xanmod)
   case ${C[$key],,} in да|д|y|yes) C[$key]=yes;; нет|н|n|no) C[$key]=no;; esac;; esac
  if [[ $key == tcp_ports || $key == udp_ports ]]; then
   case ${C[$key],,} in n|no|none|нет) C[$key]=none;; esac
@@ -73,7 +74,7 @@ collect() {
 
 plan() {
  ui_action info 'Параметры установки:'
- for k in role email node_domain panel_ip ssh_port tcp_ports udp_ports regions whitelist optimize protect traffic_guard psiphon multitest xanmod; do
+ for k in role email node_domain panel_ip ssh_port disable_password_auth tcp_ports udp_ports regions whitelist optimize protect traffic_guard psiphon multitest xanmod; do
   [[ ! -v C[$k] ]] || printf '  %-15s %s\n' "$k" "${C[$k]}"
  done
  echo 'Psiphon создаёт локальный SOCKS-прокси; маршруты Xray задаются в панели.'
@@ -103,7 +104,7 @@ while (($#)); do
  EXPLICIT[$key]=yes
  case $key in
  accelerator) [[ $value == yes || $value == no ]] || fail "--accelerator: yes/no"; C[optimize]=$value; C[protect]=$value; EXPLICIT[optimize]=yes; EXPLICIT[protect]=yes;; config) :;; node_secret_file) [[ -r $value ]] || fail "Не найден файл secret"; C[node_secret]=$(cat "$value");;
- role|email|node_domain|panel_ip|ssh_port|tcp_ports|udp_ports|whitelist|regions|guard_urls|optimize|protect|traffic_guard|psiphon|multitest|xanmod) C[$key]=$value;;
+ role|email|node_domain|panel_ip|ssh_port|disable_password_auth|tcp_ports|udp_ports|whitelist|regions|guard_urls|disable_password_auth|optimize|protect|traffic_guard|psiphon|multitest|xanmod) C[$key]=$value;;
  *) fail "Неизвестный флаг $flag";; esac
 done
 for key in tcp_ports udp_ports; do
