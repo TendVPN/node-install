@@ -8,6 +8,7 @@ set +o pipefail
 source "$root/vendor/remnawave-reverse-proxy/library.sh"
 set_language ru
 check_domain() { return 0; }
+load_selfsteal_templates_module() { :; }
 declare -A unique_domains
 source "$root/vendor/remnawave-reverse-proxy/src/nginx/install_node.sh"
 eval "$(declare -f install_node_nginx | sed "s|/opt/remnanode|$tmp/node|g")"
