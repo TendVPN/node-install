@@ -17,3 +17,33 @@ install_node_nginx >/dev/null
 [[ $CERTIFICATE == TEST_SECRET ]]
 grep -q 'remnawave-nginx:' "$tmp/node/docker-compose.yml"
 echo 'eGames node renderer/secret: OK'
+
+# Render the complete installation without touching services or real certificates.
+eval "$(declare -f installation_node | sed "s|/opt/remnanode|$tmp/node|g; s|/dev/shm/nginx.sock|$tmp/nginx.sock|g")"
+check_node_not_running() { :; }
+check_port_443_free() { :; }
+load_certificates_module() { :; }
+handle_certificates() { :; }
+resolve_certificate_domain() { echo node.example.org; }
+ufw() { :; }
+sleep() { :; }
+docker() { if [[ $1 == inspect ]]; then echo true; fi; }
+spinner() { wait "$1"; }
+randomhtml() { :; }
+CERT_METHOD=4 LETSENCRYPT_EMAIL=admin@example.org
+python3 - "$tmp/nginx.sock" <<'PYTEST'
+import socket, sys
+sock = socket.socket(socket.AF_UNIX)
+sock.bind(sys.argv[1])
+sock.close()
+PYTEST
+installation_node >/dev/null
+python3 - "$tmp/node/docker-compose.yml" <<'PYTEST'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+node = text.split('  remnanode:', 1)[1]
+assert '      - /etc/letsencrypt:/etc/letsencrypt:ro' in node
+assert 'SECRET_KEY=TEST_SECRET' in node
+PYTEST
+echo 'Node certificate mount: OK'

@@ -100,6 +100,7 @@ installation_node() {
     volumes:
       - /dev/shm:/dev/shm:rw
       - /var/log/remnanode:/var/log/remnanode
+      - /etc/letsencrypt:/etc/letsencrypt:ro
 EOL
 
 cat > /opt/remnanode/nginx.conf <<EOL

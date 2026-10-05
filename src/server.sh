@@ -208,10 +208,22 @@ PY
  if [[ ${C[protect]} == yes && $action != refresh ]]; then ui_step "Обновление защиты" accelerator protect; fi
  ui_action success 'Белый список обновлён.'
 }
+repair_node_certificate_mount() {
+ local compose=/opt/remnanode/docker-compose.yml
+ [[ -f $compose ]] || fail "Не найден $compose"
+ local changed
+ changed=$(python3 "$ROOT/src/compose.py" "$compose")
+ if [[ $changed == changed ]]; then
+  ui_action info 'Добавлен доступ ноды к сертификатам; пересоздание remnanode'
+ fi
+ docker compose -f "$compose" config -q
+ docker compose -f "$compose" up -d --no-deps remnanode
+}
 install_remnawave() {
  ui_action info "Установка Remnawave: ${C[role]}"
  if [[ -f /var/lib/tend/remnawave-role ]]; then
   [[ $(cat /var/lib/tend/remnawave-role) == "${C[role]}" ]] || fail "Смена установленной роли требует отдельного VPS или ручной миграции"
+  repair_node_certificate_mount
   echo "Remnawave уже установлен; существующая установка сохранена."; return 0
  fi
  export TEND_NODE_SECRET=${C[node_secret]:-}
