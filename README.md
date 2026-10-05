@@ -61,6 +61,157 @@ tend confirm-ssh
 
 Подключение ноды, inbound и маршруты Xray настройте в панели Remnawave. Psiphon предоставляет локальный SOCKS-прокси для использования в маршрутах.
 
+## Пример профиля Remnawave
+
+Пример с VLESS TCP REALITY на 443/tcp и Hysteria 2 на 443/udp. Создайте профиль в панели, замените значения в квадратных скобках и назначьте его ноде. Для Hysteria оставьте UDP-порт 443 открытым (`--udp-ports 443`); вариант установки с `--udp-ports none` выше его не открывает.
+
+Укажите имя ноды, домен, приватный ключ REALITY, short ID и fingerprint клиента. Пути сертификатов должны быть доступны внутри контейнера ноды. Salamander используется по желанию: если он не нужен, удалите массив `finalmask.udp`; при использовании задайте одинаковый пароль на сервере и клиенте.
+
+Адрес `172.17.0.1:1080` в примере — адрес SOCKS-прокси Psiphon. Проверьте его доступность из контейнера: установщик запускает Psiphon с `--bind-loopback`, поэтому для доступа через Docker bridge потребуется отдельная настройка адреса прослушивания и firewall. Если Psiphon не используется, удалите `psiphon-out` и правило для доменов Google AI.
+
+```json
+{
+  "log": {
+    "loglevel": "none"
+  },
+  "inbounds": [
+    {
+      "tag": "[НАЗВАНИЕ НОДЫ]_VLESS_TCP_REALITY",
+      "port": 443,
+      "listen": "0.0.0.0",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"]
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "xver": 1,
+          "target": "/dev/shm/nginx.sock",
+          "shortIds": ["[SHORT_ID]"],
+          "privateKey": "[ПРИВАТНЫЙ КЛЮЧ]",
+          "fingerprint": "[FINGERPRINT]",
+          "serverNames": ["[ДОМЕН НОДЫ]"]
+        }
+      }
+    },
+    {
+      "tag": "[НАЗВАНИЕ НОДЫ]_HYSTERIA",
+      "port": 443,
+      "listen": "0.0.0.0",
+      "protocol": "hysteria",
+      "settings": {
+        "clients": [],
+        "version": 2
+      },
+      "streamSettings": {
+        "network": "hysteria",
+        "security": "tls",
+        "finalmask": {
+          "udp": [
+            {
+              "type": "salamander",
+              "settings": {
+                "password": "[ПАРОЛЬ SALAMANDER]"
+              }
+            }
+          ],
+          "quicParams": {
+            "debug": false,
+            "congestion": "bbr"
+          }
+        },
+        "tlsSettings": {
+          "alpn": ["h3"],
+          "serverName": "[ДОМЕН НОДЫ]",
+          "certificates": [
+            {
+              "keyFile": "[ПУТЬ К privkey.pem]",
+              "certificateFile": "[ПУТЬ К fullchain.pem]"
+            }
+          ]
+        },
+        "hysteriaSettings": {
+          "version": 2
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "psiphon-out",
+      "protocol": "socks",
+      "settings": {
+        "port": 1080,
+        "address": "172.17.0.1"
+      },
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "UseIPv4"
+        }
+      }
+    },
+    {
+      "tag": "DIRECT",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "BLOCK",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "port": "25,465,587",
+        "type": "field",
+        "outboundTag": "BLOCK"
+      },
+      {
+        "type": "field",
+        "protocol": ["bittorrent"],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "type": "field",
+        "domain": ["geosite:category-ads-all", "geosite:win-spy"],
+        "outboundTag": "BLOCK"
+      },
+      {
+        "ip": ["geoip:private"],
+        "type": "field",
+        "outboundTag": "BLOCK"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "domain:gemini.google.com",
+          "domain:generativelanguage.googleapis.com",
+          "domain:ai.google.dev",
+          "domain:aistudio.google.com"
+        ],
+        "outboundTag": "psiphon-out"
+      },
+      {
+        "type": "field",
+        "inboundTag": [
+          "[НАЗВАНИЕ НОДЫ]_VLESS_TCP_REALITY",
+          "[НАЗВАНИЕ НОДЫ]_HYSTERIA"
+        ],
+        "outboundTag": "DIRECT"
+      }
+    ],
+    "domainStrategy": "AsIs"
+  }
+}
+```
+
 ## Управление VPS
 
 ```sh
